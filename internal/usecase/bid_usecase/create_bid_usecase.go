@@ -31,6 +31,7 @@ type BidUseCase struct {
 	maxBatchSize        int
 	batchInsertInterval time.Duration
 	bidChannel          chan bid_entity.Bid
+	bidBatch            []bid_entity.Bid // Instance-specific batch
 }
 
 func NewBidUseCase(bidRepository bid_entity.BidEntityRepository) BidUseCaseInterface {
@@ -43,14 +44,13 @@ func NewBidUseCase(bidRepository bid_entity.BidEntityRepository) BidUseCaseInter
 		batchInsertInterval: maxSizeInterval,
 		timer:               time.NewTimer(maxSizeInterval),
 		bidChannel:          make(chan bid_entity.Bid, maxBatchSize),
+		bidBatch:            make([]bid_entity.Bid, 0),
 	}
 
 	bidUseCase.triggerCreateRoutine(context.Background())
 
 	return bidUseCase
 }
-
-var bidBatch []bid_entity.Bid
 
 type BidUseCaseInterface interface {
 	CreateBid(
@@ -72,29 +72,31 @@ func (bu *BidUseCase) triggerCreateRoutine(ctx context.Context) {
 			select {
 			case bidEntity, ok := <-bu.bidChannel:
 				if !ok {
-					if len(bidBatch) > 0 {
-						if err := bu.BidRepository.CreateBid(ctx, bidBatch); err != nil {
+					if len(bu.bidBatch) > 0 {
+						if err := bu.BidRepository.CreateBid(ctx, bu.bidBatch); err != nil {
 							logger.Error("error trying to process bid batch list", err)
 						}
 					}
 					return
 				}
 
-				bidBatch = append(bidBatch, bidEntity)
+				bu.bidBatch = append(bu.bidBatch, bidEntity)
 
-				if len(bidBatch) >= bu.maxBatchSize {
-					if err := bu.BidRepository.CreateBid(ctx, bidBatch); err != nil {
+				if len(bu.bidBatch) >= bu.maxBatchSize {
+					if err := bu.BidRepository.CreateBid(ctx, bu.bidBatch); err != nil {
 						logger.Error("error trying to process bid batch list", err)
 					}
 
-					bidBatch = nil
+					bu.bidBatch = nil
 					bu.timer.Reset(bu.batchInsertInterval)
 				}
 			case <-bu.timer.C:
-				if err := bu.BidRepository.CreateBid(ctx, bidBatch); err != nil {
-					logger.Error("error trying to process bid batch list", err)
+				if len(bu.bidBatch) > 0 {
+					if err := bu.BidRepository.CreateBid(ctx, bu.bidBatch); err != nil {
+						logger.Error("error trying to process bid batch list", err)
+					}
 				}
-				bidBatch = nil
+				bu.bidBatch = nil
 				bu.timer.Reset(bu.batchInsertInterval)
 			}
 		}
